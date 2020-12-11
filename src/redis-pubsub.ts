@@ -1,6 +1,6 @@
-import {Cluster, Ok, Redis, RedisOptions} from 'ioredis';
-import {PubSubEngine} from 'graphql-subscriptions';
-import {PubSubAsyncIterator} from './pubsub-async-iterator';
+import { Cluster, Ok, Redis, RedisOptions } from "ioredis";
+import { PubSubEngine } from "graphql-subscriptions";
+import { PubSubAsyncIterator } from "./pubsub-async-iterator";
 
 type RedisClient = Redis | Cluster;
 type OnMessage<T> = (message: T) => void;
@@ -14,10 +14,10 @@ export interface PubSubRedisOptions {
   reviver?: Reviver;
   serializer?: Serializer;
   deserializer?: Deserializer;
+  keyPrefix?: KeyPrefix;
 }
 
 export class RedisPubSub implements PubSubEngine {
-
   constructor(options: PubSubRedisOptions = {}) {
     const {
       triggerTransform,
@@ -28,6 +28,7 @@ export class RedisPubSub implements PubSubEngine {
       reviver,
       serializer,
       deserializer,
+      keyPrefix = ""
     } = options;
 
     this.triggerTransform = triggerTransform || (trigger => trigger as string);
@@ -36,6 +37,7 @@ export class RedisPubSub implements PubSubEngine {
       throw new Error("Reviver and deserializer can't be used together");
     }
 
+    this.keyPrefix = keyPrefix;
     this.reviver = reviver;
     this.serializer = serializer;
     this.deserializer = deserializer;
@@ -46,32 +48,32 @@ export class RedisPubSub implements PubSubEngine {
     } else {
       try {
         // eslint-disable-next-line @typescript-eslint/no-var-requires
-        const IORedis = require('ioredis');
+        const IORedis = require("ioredis");
         this.redisPublisher = new IORedis(connection);
         this.redisSubscriber = new IORedis(connection);
 
         if (connectionListener) {
           this.redisPublisher
-              .on('connect', connectionListener)
-              .on('error', connectionListener);
+            .on("connect", connectionListener)
+            .on("error", connectionListener);
           this.redisSubscriber
-              .on('connect', connectionListener)
-              .on('error', connectionListener);
+            .on("connect", connectionListener)
+            .on("error", connectionListener);
         } else {
-          this.redisPublisher.on('error', console.error);
-          this.redisSubscriber.on('error', console.error);
+          this.redisPublisher.on("error", console.error);
+          this.redisSubscriber.on("error", console.error);
         }
       } catch (error) {
         console.error(
-          `No publisher or subscriber instances were provided and the package 'ioredis' wasn't found. Couldn't create Redis clients.`,
+          `No publisher or subscriber instances were provided and the package 'ioredis' wasn't found. Couldn't create Redis clients.`
         );
       }
     }
 
     // handle messages received via psubscribe and subscribe
-    this.redisSubscriber.on('pmessage', this.onMessage.bind(this));
+    this.redisSubscriber.on("pmessage", this.onMessage.bind(this));
     // partially applied function passes undefined for pattern arg since 'message' event won't provide it:
-    this.redisSubscriber.on('message', this.onMessage.bind(this, undefined));
+    this.redisSubscriber.on("message", this.onMessage.bind(this, undefined));
 
     this.subscriptionMap = {};
     this.subsRefsMap = {};
@@ -79,16 +81,26 @@ export class RedisPubSub implements PubSubEngine {
   }
 
   public async publish<T>(trigger: string, payload: T): Promise<void> {
-    await this.redisPublisher.publish(trigger, this.serializer ? this.serializer(payload) : JSON.stringify(payload));
+    const triggerName = `${this.keyPrefix}${trigger}`;
+
+    await this.redisPublisher.publish(
+      triggerName,
+      this.serializer ? this.serializer(payload) : JSON.stringify(payload)
+    );
   }
 
   public subscribe<T = any>(
     trigger: string,
     onMessage: OnMessage<T>,
-    options: unknown = {},
+    options: unknown = {}
   ): Promise<number> {
+    const triggerNameFormat = `${this.keyPrefix}${trigger}`;
 
-    const triggerName: string = this.triggerTransform(trigger, options);
+    const triggerName: string = this.triggerTransform(
+      triggerNameFormat,
+      options
+    );
+
     const id = this.currentSubscriptionId++;
     this.subscriptionMap[id] = [triggerName, onMessage];
 
@@ -98,7 +110,9 @@ export class RedisPubSub implements PubSubEngine {
       return Promise.resolve(id);
     } else {
       return new Promise<number>((resolve, reject) => {
-        const subscribeFn = options['pattern'] ? this.redisSubscriber.psubscribe : this.redisSubscriber.subscribe;
+        const subscribeFn = options["pattern"]
+          ? this.redisSubscriber.psubscribe
+          : this.redisSubscriber.subscribe;
 
         subscribeFn.call(this.redisSubscriber, triggerName, err => {
           if (err) {
@@ -106,7 +120,7 @@ export class RedisPubSub implements PubSubEngine {
           } else {
             this.subsRefsMap[triggerName] = [
               ...(this.subsRefsMap[triggerName] || []),
-              id,
+              id
             ];
             resolve(id);
           }
@@ -117,6 +131,7 @@ export class RedisPubSub implements PubSubEngine {
 
   public unsubscribe(subId: number): void {
     const [triggerName = null] = this.subscriptionMap[subId] || [];
+
     const refs = this.subsRefsMap[triggerName];
 
     if (!refs) throw new Error(`There is no subscription of id "${subId}"`);
@@ -129,14 +144,18 @@ export class RedisPubSub implements PubSubEngine {
       delete this.subsRefsMap[triggerName];
     } else {
       const index = refs.indexOf(subId);
-      this.subsRefsMap[triggerName] = index === -1
+      this.subsRefsMap[triggerName] =
+        index === -1
           ? refs
           : [...refs.slice(0, index), ...refs.slice(index + 1)];
     }
     delete this.subscriptionMap[subId];
   }
 
-  public asyncIterator<T>(triggers: string | string[], options?: unknown): AsyncIterator<T> {
+  public asyncIterator<T>(
+    triggers: string | string[],
+    options?: unknown
+  ): AsyncIterator<T> {
     return new PubSubAsyncIterator<T>(this, triggers, options);
   }
 
@@ -151,10 +170,11 @@ export class RedisPubSub implements PubSubEngine {
   public close(): Promise<Ok[]> {
     return Promise.all([
       this.redisPublisher.quit(),
-      this.redisSubscriber.quit(),
+      this.redisSubscriber.quit()
     ]);
   }
 
+  public keyPrefix?: string;
   private readonly serializer?: Serializer;
   private readonly deserializer?: Deserializer;
   private readonly triggerTransform: TriggerTransform;
@@ -162,7 +182,9 @@ export class RedisPubSub implements PubSubEngine {
   private readonly redisPublisher: RedisClient;
   private readonly reviver: Reviver;
 
-  private readonly subscriptionMap: { [subId: number]: [string, OnMessage<unknown>] };
+  private readonly subscriptionMap: {
+    [subId: number]: [string, OnMessage<unknown>];
+  };
   private readonly subsRefsMap: { [trigger: string]: Array<number> };
   private currentSubscriptionId: number;
 
@@ -174,7 +196,9 @@ export class RedisPubSub implements PubSubEngine {
 
     let parsedMessage;
     try {
-      parsedMessage = this.deserializer ? this.deserializer(message) : JSON.parse(message, this.reviver);
+      parsedMessage = this.deserializer
+        ? this.deserializer(message)
+        : JSON.parse(message, this.reviver);
     } catch (e) {
       parsedMessage = message;
     }
@@ -190,8 +214,9 @@ export type Path = Array<string | number>;
 export type Trigger = string | Path;
 export type TriggerTransform = (
   trigger: Trigger,
-  channelOptions?: unknown,
+  channelOptions?: unknown
 ) => string;
 export type Reviver = (key: any, value: any) => any;
 export type Serializer = (source: any) => string;
 export type Deserializer = (source: string) => any;
+export type KeyPrefix = string;
